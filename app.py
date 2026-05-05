@@ -3,36 +3,54 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-# 🏠 Rota de teste (Render + navegador)
+# 💾 memória simples (depois podemos trocar por banco)
+gastos = []
+
 @app.route("/", methods=["GET"])
 def home():
-    return "Bot financeiro está online!"
+    return "Bot financeiro online!"
 
-# 💬 Webhook do WhatsApp (Twilio)
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    # Mensagem recebida
-    incoming_msg = request.values.get("Body", "").lower()
-
-    # Resposta do bot
+    incoming_msg = request.values.get("Body", "").lower().strip()
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Lógica simples do bot financeiro (exemplo)
+    global gastos
+
+    # 💬 oi
     if "oi" in incoming_msg:
-        msg.body("Olá! 👋 Sou seu bot financeiro.")
+        msg.body("Olá 👋! Pode registrar: gastei 30 lanche")
+
+    # 💰 registrar gasto
     elif "gastei" in incoming_msg:
-        msg.body("Anotado! 💰 Seu gasto foi registrado (versão base).")
+        try:
+            partes = incoming_msg.split()
+            valor = float(partes[1])
+            categoria = " ".join(partes[2:]) if len(partes) > 2 else "geral"
+
+            gastos.append({"valor": valor, "categoria": categoria})
+
+            msg.body(f"✔ Gasto registrado: R${valor} em {categoria}")
+        except:
+            msg.body("Formato correto: gastei 30 lanche")
+
+    # 📊 saldo
     elif "saldo" in incoming_msg:
-        msg.body("Seu saldo ainda não está implementado 🙂")
+        total = sum(g["valor"] for g in gastos)
+        msg.body(f"💰 Seu total gasto é R${total:.2f}")
+
+    # 📋 lista
+    elif "lista" in incoming_msg or "gastos" in incoming_msg:
+        if not gastos:
+            msg.body("Nenhum gasto registrado ainda.")
+        else:
+            texto = "📋 Seus gastos:\n"
+            for g in gastos:
+                texto += f"- R${g['valor']} em {g['categoria']}\n"
+            msg.body(texto)
+
     else:
-        msg.body("Não entendi 🤖. Tente: oi, gastei, saldo")
+        msg.body("Não entendi 🤖. Use: oi, gastei, saldo, lista")
 
     return str(resp)
-
-
-# 🚀 IMPORTANTE: compatível com Render (porta dinâmica)
-if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
