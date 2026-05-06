@@ -1,16 +1,25 @@
-
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import os
 
 app = Flask(__name__)
 
-# 💾 memória temporária (em produção depois vira banco de dados)
+# 💾 memória temporária (depois vira banco de dados)
 gastos = []
+
+# 🔧 converter valores brasileiros e decimais
+def parse_valor(valor_str):
+    try:
+        valor_str = valor_str.replace(".", "").replace(",", ".")
+        return float(valor_str)
+    except:
+        return None
+
 
 @app.route("/", methods=["GET"])
 def home():
     return "Bot Financeiro online 💰"
+
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
@@ -24,14 +33,15 @@ def whatsapp():
 
     global gastos
 
-    # 🟢 MENU / APRESENTAÇÃO
+    # 🟢 MENU
     if any(x in incoming_msg for x in ["oi", "olá", "menu", "ajuda", "help"]):
         msg.body(
             "👋 *Bot Financeiro* 💰\n\n"
             "📌 *Comandos disponíveis:*\n"
             "━━━━━━━━━━━━━━\n"
             "💸 Registrar gasto:\n"
-            "   gastei 30 lanche\n\n"
+            "   gastei 30,50 lanche\n"
+            "   gastei 10 mercado\n\n"
             "📊 Ver saldo total:\n"
             "   saldo\n\n"
             "📋 Listar gastos:\n"
@@ -40,20 +50,25 @@ def whatsapp():
             "   apagar tudo\n"
             "━━━━━━━━━━━━━━\n\n"
             "💡 Exemplo:\n"
-            "gastei 50 mercado"
+            "gastei 1.200,75 mercado"
         )
         return str(resp)
 
-    # 💰 REGISTRAR GASTO
+    # 💰 REGISTRAR GASTO (MELHORADO)
     elif "gastei" in incoming_msg:
         try:
             partes = incoming_msg.split()
 
             if len(partes) < 2:
-                msg.body("❌ Use: gastei 30 lanche")
+                msg.body("❌ Use: gastei 30,50 lanche")
                 return str(resp)
 
-            valor = float(partes[1])
+            valor = parse_valor(partes[1])
+
+            if valor is None:
+                msg.body("❌ Valor inválido. Ex: gastei 10,50 lanche")
+                return str(resp)
+
             categoria = " ".join(partes[2:]) if len(partes) > 2 else "geral"
 
             gastos.append({"valor": valor, "categoria": categoria})
@@ -61,7 +76,7 @@ def whatsapp():
             msg.body(f"✔ Gasto registrado: R${valor:.2f} em {categoria}")
 
         except:
-            msg.body("❌ Erro. Use: gastei 30 lanche")
+            msg.body("❌ Erro ao registrar gasto")
 
     # 📊 SALDO TOTAL
     elif "saldo" in incoming_msg:
