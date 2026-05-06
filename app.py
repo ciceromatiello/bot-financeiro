@@ -1,90 +1,73 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-import os
 
 app = Flask(__name__)
 
-# 💾 memória temporária (depois vira banco de dados)
+# 💾 memória temporária (em produção use banco de dados)
 gastos = []
-
-# 🔧 converter valores brasileiros e decimais
-def parse_valor(valor_str):
-    try:
-        valor_str = valor_str.replace(".", "").replace(",", ".")
-        return float(valor_str)
-    except:
-        return None
-
 
 @app.route("/", methods=["GET"])
 def home():
     return "Bot Financeiro online 💰"
 
-
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    print("🔥 CHEGOU NO ENDPOINT /WHATSAPP")
+    print("🔥 CHEGOU NO WHATSAPP")
 
     resp = MessagingResponse()
     msg = resp.message()
 
-    original_msg = request.values.get("Body", "")
-    incoming_msg = original_msg.lower().strip()
+    incoming_msg = request.values.get("Body", "").lower().strip()
 
     global gastos
 
     # 🟢 MENU
-    if any(x in incoming_msg for x in ["oi", "olá", "menu", "ajuda", "help"]):
+    if incoming_msg in ["oi", "olá", "menu", "ajuda", "help"]:
         msg.body(
-            "👋 *Bot Financeiro* 💰\n\n"
-            "📌 *Comandos disponíveis:*\n"
+            "👋 Bot Financeiro 💰\n\n"
+            "📌 Comandos:\n"
             "━━━━━━━━━━━━━━\n"
-            "💸 Registrar gasto:\n"
-            "   gastei 30,50 lanche\n"
-            "   gastei 10 mercado\n\n"
-            "📊 Ver saldo total:\n"
-            "   saldo\n\n"
-            "📋 Listar gastos:\n"
-            "   lista\n\n"
-            "🗑️ Apagar tudo:\n"
-            "   apagar tudo\n"
-            "━━━━━━━━━━━━━━\n\n"
-            "💡 Exemplo:\n"
-            "gastei 1.200,75 mercado"
+            "💸 gastei 30,50 lanche\n"
+            "📊 saldo\n"
+            "📋 lista\n"
+            "🗑️ apagar tudo\n"
+            "━━━━━━━━━━━━━━\n"
         )
         return str(resp)
 
-    # 💰 REGISTRAR GASTO (MELHORADO)
-    elif "gastei" in incoming_msg:
+    # 💸 REGISTRAR GASTO
+    if incoming_msg.startswith("gastei"):
         try:
-            partes = incoming_msg.split()
+            partes = incoming_msg.replace(",", ".").split()
 
             if len(partes) < 2:
                 msg.body("❌ Use: gastei 30,50 lanche")
                 return str(resp)
 
-            valor = parse_valor(partes[1])
-
-            if valor is None:
-                msg.body("❌ Valor inválido. Ex: gastei 10,50 lanche")
-                return str(resp)
-
+            valor = float(partes[1])
             categoria = " ".join(partes[2:]) if len(partes) > 2 else "geral"
 
-            gastos.append({"valor": valor, "categoria": categoria})
+            gastos.append({
+                "valor": valor,
+                "categoria": categoria
+            })
 
-            msg.body(f"✔ Gasto registrado: R${valor:.2f} em {categoria}")
+            msg.body(f"✔️ Gasto registrado: R${valor:.2f} em {categoria}")
 
-        except:
-            msg.body("❌ Erro ao registrar gasto")
+        except Exception as e:
+            print("Erro:", e)
+            msg.body("❌ Erro ao registrar. Use: gastei 30,50 lanche")
+
+        return str(resp)
 
     # 📊 SALDO TOTAL
-    elif "saldo" in incoming_msg:
+    if incoming_msg == "saldo":
         total = sum(g["valor"] for g in gastos)
-        msg.body(f"💰 Total gasto até agora: R${total:.2f}")
+        msg.body(f"💰 Total gasto: R${total:.2f}")
+        return str(resp)
 
     # 📋 LISTAR GASTOS
-    elif "lista" in incoming_msg or "gastos" in incoming_msg:
+    if incoming_msg in ["lista", "gastos"]:
         if not gastos:
             msg.body("📭 Nenhum gasto registrado ainda.")
         else:
@@ -93,19 +76,21 @@ def whatsapp():
                 texto += f"• R${g['valor']:.2f} em {g['categoria']}\n"
             msg.body(texto)
 
+        return str(resp)
+
     # 🗑️ APAGAR TUDO
-    elif "apagar tudo" in incoming_msg:
+    if incoming_msg == "apagar tudo":
         gastos.clear()
-        msg.body("🗑️ Todos os gastos foram apagados com sucesso!")
+        msg.body("🗑️ Todos os gastos foram apagados!")
+        return str(resp)
 
     # ❌ PADRÃO
-    else:
-        msg.body("❓ Não entendi 🤖\nDigite 'menu' para ver os comandos.")
-
+    msg.body("❓ Não entendi 🤖\nDigite 'menu' para ver comandos.")
     return str(resp)
 
 
-# 🚀 COMPATÍVEL COM RENDER
+# 🚀 RENDER / PRODUÇÃO
 if __name__ == "__main__":
+    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
