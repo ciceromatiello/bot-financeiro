@@ -608,9 +608,9 @@ def whatsapp():
 # 🚀 INICIALIZAÇÃO
 # ==========================================
 
-if __name__ == "__main__":
+criar_tabelas()
 
-    criar_tabelas()
+if __name__ == "__main__":
 
     port = int(
         os.environ.get(
