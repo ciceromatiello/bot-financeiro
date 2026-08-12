@@ -1,15 +1,205 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+import psycopg2
 import os
 
 app = Flask(__name__)
 
-# 💾 Memória temporária
-gastos = []
 
-# 🎯 Limite de gastos
-limite_gastos = 0
+# ==========================================
+# 🗄️ BANCO DE DADOS
+# ==========================================
 
+def conectar():
+    database_url = os.environ.get("DATABASE_URL")
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL não configurada.")
+
+    return psycopg2.connect(database_url)
+
+
+def criar_tabelas():
+    conn = conectar()
+    cur = conn.cursor()
+
+    # 👤 Usuários e limites
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            telefone VARCHAR(50) PRIMARY KEY,
+            limite_mensal NUMERIC(12,2) DEFAULT 0
+        )
+    """)
+
+    # 💸 Gastos
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gastos (
+            id SERIAL PRIMARY KEY,
+            telefone VARCHAR(50) NOT NULL,
+            valor NUMERIC(12,2) NOT NULL,
+            categoria VARCHAR(255) NOT NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def garantir_usuario(telefone):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO usuarios (telefone, limite_mensal)
+        VALUES (%s, 0)
+        ON CONFLICT (telefone) DO NOTHING
+    """, (telefone,))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def obter_limite(telefone):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT limite_mensal
+        FROM usuarios
+        WHERE telefone = %s
+    """, (telefone,))
+
+    resultado = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if resultado:
+        return float(resultado[0])
+
+    return 0
+
+
+def definir_limite(telefone, valor):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE usuarios
+        SET limite_mensal = %s
+        WHERE telefone = %s
+    """, (valor, telefone))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def registrar_gasto(telefone, valor, categoria):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO gastos (telefone, valor, categoria)
+        VALUES (%s, %s, %s)
+    """, (telefone, valor, categoria))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def obter_gastos(telefone):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, valor, categoria
+        FROM gastos
+        WHERE telefone = %s
+        ORDER BY id ASC
+    """, (telefone,))
+
+    resultados = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return resultados
+
+
+def obter_total(telefone):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COALESCE(SUM(valor), 0)
+        FROM gastos
+        WHERE telefone = %s
+    """, (telefone,))
+
+    total = cur.fetchone()[0]
+
+    cur.close()
+    conn.close()
+
+    return float(total)
+
+
+def apagar_gasto_por_posicao(telefone, posicao):
+    gastos_usuario = obter_gastos(telefone)
+
+    if posicao < 1 or posicao > len(gastos_usuario):
+        return None
+
+    gasto = gastos_usuario[posicao - 1]
+
+    id_gasto = gasto[0]
+    valor = float(gasto[1])
+    categoria = gasto[2]
+
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        DELETE FROM gastos
+        WHERE id = %s AND telefone = %s
+    """, (id_gasto, telefone))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "valor": valor,
+        "categoria": categoria
+    }
+
+
+def apagar_todos_gastos(telefone):
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.execute("""
+        DELETE FROM gastos
+        WHERE telefone = %s
+    """, (telefone,))
+
+    quantidade = cur.rowcount
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return quantidade
+
+
+# ==========================================
+# 🌐 ROTAS
+# ==========================================
 
 @app.route("/", methods=["GET"])
 def home():
@@ -24,322 +214,412 @@ def whatsapp():
     resp = MessagingResponse()
     msg = resp.message()
 
-    # 📱 Mensagem recebida pelo WhatsApp
     original_msg = request.form.get("Body", "")
     incoming_msg = original_msg.lower().strip()
 
+    # 📱 Identifica quem enviou
+    telefone = request.form.get("From", "desconhecido")
+
     print("Mensagem:", incoming_msg)
+    print("Usuário:", telefone)
 
-    global gastos
-    global limite_gastos
+    try:
+        garantir_usuario(telefone)
 
-    # 🟢 MENU
-    if incoming_msg in ["oi", "olá", "ola", "menu", "ajuda", "help"]:
+        # ==========================================
+        # 🟢 MENU
+        # ==========================================
 
-        msg.body(
-            "👋 *Bot Financeiro* 💰\n\n"
-            "📌 *Comandos disponíveis:*\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-
-            "💸 *Registrar gasto:*\n"
-            "gastei 30,50 lanche\n\n"
-
-            "📊 *Ver saldo:*\n"
-            "saldo\n\n"
-
-            "📋 *Listar gastos:*\n"
-            "lista\n\n"
-
-            "🎯 *Definir limite:*\n"
-            "limite 500\n\n"
-
-            "🎯 *Ver limite:*\n"
-            "limite\n\n"
-
-            "🗑️ *Apagar um gasto:*\n"
-            "apagar 3\n\n"
-
-            "⚠️ *Apagar todos:*\n"
-            "apagar tudo\n\n"
-
-            "━━━━━━━━━━━━━━━━━━\n\n"
-
-            "💡 *Exemplo:*\n"
-            "gastei 55,76 mercado"
-        )
-
-        return str(resp)
-
-    # 🎯 DEFINIR LIMITE
-    elif incoming_msg.startswith("limite "):
-
-        try:
-            partes = incoming_msg.split()
-
-            if len(partes) != 2:
-                msg.body("❌ Use assim:\nlimite 500")
-                return str(resp)
-
-            valor_str = partes[1].replace(",", ".")
-            novo_limite = float(valor_str)
-
-            if novo_limite <= 0:
-                msg.body("❌ O limite precisa ser maior que zero.")
-                return str(resp)
-
-            limite_gastos = novo_limite
-
-            total = sum(g["valor"] for g in gastos)
-            restante = limite_gastos - total
+        if incoming_msg in ["oi", "olá", "ola", "menu", "ajuda", "help"]:
 
             msg.body(
-                f"🎯 *Limite definido!*\n\n"
-                f"💰 Limite: R${limite_gastos:.2f}\n"
-                f"📊 Já gasto: R${total:.2f}\n"
-                f"💵 Disponível: R${restante:.2f}"
+                "👋 *Bot Financeiro* 💰\n\n"
+                "📌 *Comandos disponíveis:*\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+
+                "💸 *Registrar gasto:*\n"
+                "gastei 30,50 lanche\n\n"
+
+                "📊 *Ver saldo:*\n"
+                "saldo\n\n"
+
+                "📋 *Listar gastos:*\n"
+                "lista\n\n"
+
+                "🎯 *Definir limite:*\n"
+                "limite 2000\n\n"
+
+                "🎯 *Ver limite:*\n"
+                "limite\n\n"
+
+                "🗑️ *Apagar um gasto:*\n"
+                "apagar 3\n\n"
+
+                "⚠️ *Apagar todos:*\n"
+                "apagar tudo\n\n"
+
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "💡 *Exemplo:*\n"
+                "gastei 55,76 mercado"
             )
 
-        except Exception as e:
-            print("Erro:", e)
-            msg.body("❌ Valor inválido.\nUse: limite 500")
+        # ==========================================
+        # 🎯 DEFINIR LIMITE
+        # ==========================================
 
-    # 🎯 VER LIMITE
-    elif incoming_msg == "limite":
+        elif incoming_msg.startswith("limite "):
 
-        total = sum(g["valor"] for g in gastos)
+            try:
+                partes = incoming_msg.split()
 
-        if limite_gastos <= 0:
-            msg.body(
-                "🎯 *Limite não definido.*\n\n"
-                "Para definir, use:\n"
-                "limite 500"
-            )
-        else:
+                if len(partes) != 2:
+                    msg.body("❌ Use assim:\nlimite 2000")
+                    return str(resp)
 
-            restante = limite_gastos - total
+                valor = float(partes[1].replace(",", "."))
 
-            if restante > 0:
+                if valor <= 0:
+                    msg.body("❌ O limite precisa ser maior que zero.")
+                    return str(resp)
+
+                definir_limite(telefone, valor)
+
+                total = obter_total(telefone)
+                restante = valor - total
+
                 msg.body(
-                    f"🎯 *Seu limite*\n\n"
-                    f"💰 Limite: R${limite_gastos:.2f}\n"
-                    f"📊 Gasto: R${total:.2f}\n"
-                    f"🟢 Disponível: R${restante:.2f}"
+                    f"🎯 *Limite definido!*\n\n"
+                    f"💰 Limite: R${valor:.2f}\n"
+                    f"📊 Total gasto: R${total:.2f}\n"
+                    f"💵 Disponível: R${restante:.2f}"
                 )
 
-            elif restante == 0:
+            except ValueError:
                 msg.body(
-                    f"⚠️ *LIMITE ATINGIDO!*\n\n"
-                    f"🎯 Limite: R${limite_gastos:.2f}\n"
-                    f"📊 Gasto: R${total:.2f}\n"
-                    f"🔴 Disponível: R$0,00"
+                    "❌ Valor inválido.\n\n"
+                    "Exemplo:\n"
+                    "limite 2000"
+                )
+
+        # ==========================================
+        # 🎯 VER LIMITE
+        # ==========================================
+
+        elif incoming_msg == "limite":
+
+            limite = obter_limite(telefone)
+            total = obter_total(telefone)
+
+            if limite <= 0:
+
+                msg.body(
+                    "🎯 *Limite não definido.*\n\n"
+                    "Para definir:\n"
+                    "limite 2000"
                 )
 
             else:
-                ultrapassado = abs(restante)
 
-                msg.body(
-                    f"🚨 *LIMITE ULTRAPASSADO!*\n\n"
-                    f"🎯 Limite: R${limite_gastos:.2f}\n"
-                    f"📊 Gasto: R${total:.2f}\n"
-                    f"🔴 Ultrapassou: R${ultrapassado:.2f}"
-                )
+                restante = limite - total
 
-    # 💰 REGISTRAR GASTO
-    elif incoming_msg.startswith("gastei"):
+                if restante >= 0:
 
-        try:
-            partes = incoming_msg.split()
-
-            if len(partes) < 2:
-                msg.body("❌ Use:\ngastei 30,50 lanche")
-                return str(resp)
-
-            # Suporta vírgula ou ponto
-            valor_str = partes[1].replace(",", ".")
-            valor = float(valor_str)
-
-            if valor <= 0:
-                msg.body("❌ O valor precisa ser maior que zero.")
-                return str(resp)
-
-            categoria = (
-                " ".join(partes[2:])
-                if len(partes) > 2
-                else "geral"
-            )
-
-            gastos.append({
-                "valor": valor,
-                "categoria": categoria
-            })
-
-            total = sum(g["valor"] for g in gastos)
-
-            resposta = (
-                f"✔️ *Gasto registrado!*\n\n"
-                f"💸 Valor: R${valor:.2f}\n"
-                f"📌 Categoria: {categoria}\n"
-                f"📊 Total gasto: R${total:.2f}"
-            )
-
-            # ⚠️ AVISAR SOBRE LIMITE
-            if limite_gastos > 0:
-
-                restante = limite_gastos - total
-
-                if restante > 0:
-                    resposta += (
-                        f"\n\n🎯 Limite: R${limite_gastos:.2f}"
-                        f"\n🟢 Disponível: R${restante:.2f}"
-                    )
-
-                elif restante == 0:
-                    resposta += (
-                        "\n\n⚠️ *ATENÇÃO!*\n"
-                        "Você atingiu seu limite de gastos!"
+                    msg.body(
+                        f"🎯 *Seu limite*\n\n"
+                        f"💰 Limite: R${limite:.2f}\n"
+                        f"📊 Total gasto: R${total:.2f}\n"
+                        f"🟢 Disponível: R${restante:.2f}"
                     )
 
                 else:
-                    ultrapassado = abs(restante)
 
-                    resposta += (
-                        "\n\n🚨 *ATENÇÃO!*\n"
-                        f"Você ultrapassou seu limite em "
-                        f"R${ultrapassado:.2f}!"
+                    msg.body(
+                        f"🚨 *Limite ultrapassado!*\n\n"
+                        f"🎯 Limite: R${limite:.2f}\n"
+                        f"📊 Total gasto: R${total:.2f}\n"
+                        f"🔴 Ultrapassou: R${abs(restante):.2f}"
                     )
 
-            msg.body(resposta)
+        # ==========================================
+        # 💸 REGISTRAR GASTO
+        # ==========================================
 
-        except Exception as e:
-            print("Erro:", e)
-            msg.body(
-                "❌ Erro ao registrar.\n"
-                "Use: gastei 30,50 lanche"
-            )
+        elif incoming_msg.startswith("gastei"):
 
-    # 📊 SALDO
-    elif incoming_msg == "saldo":
+            try:
+                partes = incoming_msg.split()
 
-        total = sum(g["valor"] for g in gastos)
+                if len(partes) < 2:
+                    msg.body(
+                        "❌ Use assim:\n"
+                        "gastei 30,50 lanche"
+                    )
+                    return str(resp)
 
-        if limite_gastos > 0:
+                valor = float(partes[1].replace(",", "."))
 
-            restante = limite_gastos - total
+                if valor <= 0:
+                    msg.body("❌ O valor precisa ser maior que zero.")
+                    return str(resp)
 
-            if restante >= 0:
-                msg.body(
-                    f"💰 *Saldo dos gastos*\n\n"
-                    f"📊 Total gasto: R${total:.2f}\n"
-                    f"🎯 Limite: R${limite_gastos:.2f}\n"
-                    f"🟢 Disponível: R${restante:.2f}"
+                categoria = (
+                    " ".join(partes[2:])
+                    if len(partes) > 2
+                    else "geral"
                 )
+
+                registrar_gasto(
+                    telefone,
+                    valor,
+                    categoria
+                )
+
+                total = obter_total(telefone)
+                limite = obter_limite(telefone)
+
+                resposta = (
+                    f"✔️ *Gasto registrado!*\n\n"
+                    f"💸 Valor: R${valor:.2f}\n"
+                    f"📌 Categoria: {categoria}\n"
+                    f"📊 Total gasto: R${total:.2f}"
+                )
+
+                if limite > 0:
+
+                    restante = limite - total
+
+                    resposta += (
+                        f"\n\n🎯 Limite: R${limite:.2f}"
+                    )
+
+                    if restante > 0:
+
+                        resposta += (
+                            f"\n🟢 Disponível: R${restante:.2f}"
+                        )
+
+                    elif restante == 0:
+
+                        resposta += (
+                            "\n\n⚠️ *ATENÇÃO!*\n"
+                            "Você atingiu seu limite de gastos!"
+                        )
+
+                    else:
+
+                        resposta += (
+                            "\n\n🚨 *ATENÇÃO!*\n"
+                            f"Você ultrapassou seu limite em "
+                            f"R${abs(restante):.2f}!"
+                        )
+
+                msg.body(resposta)
+
+            except ValueError:
+
+                msg.body(
+                    "❌ Valor inválido.\n\n"
+                    "Use:\n"
+                    "gastei 30,50 lanche"
+                )
+
+        # ==========================================
+        # 📊 SALDO
+        # ==========================================
+
+        elif incoming_msg == "saldo":
+
+            total = obter_total(telefone)
+            limite = obter_limite(telefone)
+
+            if limite > 0:
+
+                restante = limite - total
+
+                if restante >= 0:
+
+                    msg.body(
+                        f"💰 *Saldo dos gastos*\n\n"
+                        f"📊 Total gasto: R${total:.2f}\n"
+                        f"🎯 Limite: R${limite:.2f}\n"
+                        f"🟢 Disponível: R${restante:.2f}"
+                    )
+
+                else:
+
+                    msg.body(
+                        f"💰 *Saldo dos gastos*\n\n"
+                        f"📊 Total gasto: R${total:.2f}\n"
+                        f"🎯 Limite: R${limite:.2f}\n"
+                        f"🔴 Ultrapassado: R${abs(restante):.2f}"
+                    )
+
             else:
+
                 msg.body(
-                    f"💰 *Saldo dos gastos*\n\n"
-                    f"📊 Total gasto: R${total:.2f}\n"
-                    f"🎯 Limite: R${limite_gastos:.2f}\n"
-                    f"🔴 Ultrapassado: R${abs(restante):.2f}"
+                    f"💰 *Total gasto:* R${total:.2f}\n\n"
+                    "🎯 Você ainda não definiu um limite."
                 )
 
-        else:
-            msg.body(
-                f"💰 *Total gasto:* R${total:.2f}"
-            )
+        # ==========================================
+        # 📋 LISTA
+        # ==========================================
 
-    # 📋 LISTAR GASTOS
-    elif incoming_msg == "lista":
+        elif incoming_msg == "lista":
 
-        if not gastos:
-            msg.body("📭 Nenhum gasto registrado ainda.")
+            gastos_usuario = obter_gastos(telefone)
 
-        else:
+            if not gastos_usuario:
 
-            texto = "📋 *Seus gastos:*\n\n"
+                msg.body(
+                    "📭 Nenhum gasto registrado ainda."
+                )
 
-            for i, g in enumerate(gastos, start=1):
+            else:
+
+                texto = "📋 *Seus gastos:*\n\n"
+
+                total = 0
+
+                for numero, gasto in enumerate(
+                    gastos_usuario,
+                    start=1
+                ):
+
+                    valor = float(gasto[1])
+                    categoria = gasto[2]
+
+                    total += valor
+
+                    texto += (
+                        f"*{numero}.* "
+                        f"R${valor:.2f} — "
+                        f"{categoria}\n"
+                    )
 
                 texto += (
-                    f"*{i}.* R${g['valor']:.2f} "
-                    f"— {g['categoria']}\n"
-                )
-
-            total = sum(g["valor"] for g in gastos)
-
-            texto += (
-                f"\n💰 *Total:* R${total:.2f}\n\n"
-                "🗑️ Para apagar um gasto:\n"
-                "apagar 3"
-            )
-
-            msg.body(texto)
-
-    # 🗑️ APAGAR UM GASTO
-    elif incoming_msg.startswith("apagar ") and incoming_msg != "apagar tudo":
-
-        try:
-
-            partes = incoming_msg.split()
-
-            if len(partes) != 2:
-                msg.body(
-                    "❌ Use assim:\n"
+                    f"\n💰 *Total:* R${total:.2f}\n\n"
+                    "🗑️ Para apagar um gasto:\n"
                     "apagar 3"
                 )
-                return str(resp)
 
-            numero = int(partes[1])
+                msg.body(texto)
 
-            if numero < 1 or numero > len(gastos):
+        # ==========================================
+        # 🗑️ APAGAR TUDO
+        # IMPORTANTE: fica antes de "apagar número"
+        # ==========================================
+
+        elif incoming_msg == "apagar tudo":
+
+            quantidade = apagar_todos_gastos(telefone)
+
+            if quantidade == 0:
+
                 msg.body(
-                    f"❌ Gasto número {numero} não encontrado.\n\n"
-                    "Use *lista* para ver os números dos gastos."
+                    "📭 Não existem gastos para apagar."
                 )
-                return str(resp)
 
-            gasto_removido = gastos.pop(numero - 1)
+            else:
 
-            msg.body(
-                f"🗑️ *Gasto apagado!*\n\n"
-                f"💸 Valor: R${gasto_removido['valor']:.2f}\n"
-                f"📌 Categoria: {gasto_removido['categoria']}"
-            )
+                msg.body(
+                    "🗑️ *Todos os gastos foram apagados!*\n\n"
+                    f"📊 {quantidade} gasto(s) removido(s)."
+                )
 
-        except ValueError:
+        # ==========================================
+        # 🗑️ APAGAR UM GASTO
+        # ==========================================
 
-            msg.body(
-                "❌ Número inválido.\n\n"
-                "Exemplo:\n"
-                "apagar 3"
-            )
+        elif incoming_msg.startswith("apagar "):
 
-    # 🗑️ APAGAR TUDO
-    elif incoming_msg == "apagar tudo":
+            try:
+                partes = incoming_msg.split()
 
-        if not gastos:
-            msg.body("📭 Não existem gastos para apagar.")
+                if len(partes) != 2:
+
+                    msg.body(
+                        "❌ Use assim:\n"
+                        "apagar 3"
+                    )
+
+                    return str(resp)
+
+                numero = int(partes[1])
+
+                gasto_removido = apagar_gasto_por_posicao(
+                    telefone,
+                    numero
+                )
+
+                if gasto_removido is None:
+
+                    msg.body(
+                        f"❌ Gasto número {numero} "
+                        "não encontrado.\n\n"
+                        "Use *lista* para ver seus gastos."
+                    )
+
+                else:
+
+                    total = obter_total(telefone)
+
+                    msg.body(
+                        f"🗑️ *Gasto apagado!*\n\n"
+                        f"💸 Valor: "
+                        f"R${gasto_removido['valor']:.2f}\n"
+                        f"📌 Categoria: "
+                        f"{gasto_removido['categoria']}\n\n"
+                        f"💰 Total agora: R${total:.2f}"
+                    )
+
+            except ValueError:
+
+                msg.body(
+                    "❌ Número inválido.\n\n"
+                    "Exemplo:\n"
+                    "apagar 3"
+                )
+
+        # ==========================================
+        # ❓ COMANDO NÃO RECONHECIDO
+        # ==========================================
 
         else:
-            quantidade = len(gastos)
-
-            gastos.clear()
 
             msg.body(
-                f"🗑️ *Todos os gastos foram apagados!*\n\n"
-                f"📊 {quantidade} gasto(s) removido(s)."
+                "❓ Não entendi 🤖\n\n"
+                "Digite *menu* para ver os comandos."
             )
 
-    # ❌ PADRÃO
-    else:
+    except Exception as e:
+
+        print("❌ ERRO:", e)
 
         msg.body(
-            "❓ Não entendi 🤖\n\n"
-            "Digite *menu* para ver os comandos."
+            "⚠️ Ocorreu um erro no Bot Financeiro.\n"
+            "Tente novamente em alguns instantes."
         )
 
     return str(resp)
 
 
-# 🚀 RENDER
+# ==========================================
+# 🚀 INICIALIZAÇÃO
+# ==========================================
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+
+    criar_tabelas()
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
